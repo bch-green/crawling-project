@@ -1,5 +1,5 @@
 sheet_id: "1PncuqrcU1pmNIHsWNepaJe9IdFDMJnpN82e-Fgdn52Y"
-worksheet: "clinical_trials_full_clean.csv"   # ← 실제 탭 이름
+worksheet: "매일 업데이트 되는 전체 임상시험 시트"   # ← 실제 탭 이름
 service_account_json: "config/sa.json"
 
 since_sn_buffer: 10

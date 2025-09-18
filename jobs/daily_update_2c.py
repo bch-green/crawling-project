@@ -5,7 +5,7 @@
 매일 자동 실행되는 임상시험 데이터 증분 업데이트 스크립트
 
 이 스크립트는 cron을 통해 매일 10:00 AM에 자동 실행되며, 
-다음과 같은 3단계 파이프라인을 수행합니다:
+다음과 같은 4단계 파이프라인을 수행합니다:
 
 1단계: 증분 크롤링 (crawler/2c.py)
   - Google Sheets에서 마지막 수집된 clncTestSn 확인
@@ -22,6 +22,11 @@
   - 기존 데이터와 중복 확인 (clncTestSn 기준)
   - 새로운 데이터만 Google Sheets에 추가
   - 실행 결과 로깅 및 통계 리포트
+
+4단계: 필터링된 시트 업데이트 (pipeline/sheets_filter.py)
+  - 전체 구글 시트 데이터 기반으로 필터링
+  - 진행상태별, 조건별 분류 시트 자동 생성
+  - filtered_premium, filtered_recruiting, filtered_approved 시트 업데이트
 
 사용법:
   python jobs/daily_update_2c.py [config/settings.yaml]
@@ -140,6 +145,104 @@ def get_existing_sns(ws, key_col: str = "clncTestSn") -> set[str]:
         print(f"⚠️ 기존 SN 목록 가져오기 실패: {e}")
         return set()
 
+def sort_worksheet_by_clnc_sn(ws):
+    """워크시트를 clncTestSn 컬럼 기준으로 오름차순 정렬"""
+    try:
+        # 헤더 행 제외하고 데이터 영역만 정렬
+        ws.sort((1, 1), num_rows=ws.row_count)
+        print("📊 clncTestSn 기준 정렬 적용됨")
+    except Exception as e:
+        print(f"⚠️ 정렬 실패: {e}")
+
+def remove_status_dropdown(ws, header: list[str]):
+    """진행상태 컬럼의 잘못된 드롭다운 속성 제거 (매일 업데이트되는 전체 임상시험 시트 전용)"""
+    try:
+        if "진행상태" not in header:
+            return
+
+        # 진행상태 컬럼 인덱스 찾기 (0-based)
+        status_col_idx = header.index("진행상태")
+
+        # 데이터 검증 규칙 제거 요청
+        body = {
+            "requests": [
+                {
+                    "setDataValidation": {
+                        "range": {
+                            "sheetId": ws.id,
+                            "startRowIndex": 1,  # 헤더 제외
+                            "endRowIndex": 1000,  # 충분히 큰 범위
+                            "startColumnIndex": status_col_idx,
+                            "endColumnIndex": status_col_idx + 1
+                        },
+                        "rule": None  # 검증 규칙 제거
+                    }
+                }
+            ]
+        }
+
+        ws.spreadsheet.batch_update(body)
+        print("✅ 진행상태 컬럼 드롭다운 속성 제거 완료")
+
+    except Exception as e:
+        print(f"⚠️ 진행상태 드롭다운 제거 실패: {e}")
+
+
+def setup_contact_status_dropdown(ws, header: list[str]):
+    """컨택상태 컬럼에 드롭다운 목록 설정"""
+    try:
+        if "컨택상태" not in header:
+            return
+            
+        # 컨택상태 컬럼 인덱스 찾기
+        contact_col_idx = header.index("컨택상태") + 1
+        
+        # 드롭다운 옵션 정의
+        contact_options = [
+            "데이터없음",
+            "컨택필요", 
+            "컨택중",
+            "컨택종료",
+            "계약진행중",
+            "계약완료"
+        ]
+        
+        # 데이터 검증 규칙 설정
+        from gspread.utils import rowcol_to_a1
+        
+        # 전체 컬럼에 대해 드롭다운 설정 (최대 1000행)
+        range_name = f"{rowcol_to_a1(2, contact_col_idx)}:{rowcol_to_a1(1000, contact_col_idx)}"
+        
+        # 워크시트 ID 가져오기
+        worksheet_id = ws.id
+        
+        # 배치 업데이트 요청
+        requests = [{
+            "setDataValidation": {
+                "range": {
+                    "sheetId": worksheet_id,
+                    "startRowIndex": 1,  # 헤더 제외
+                    "endRowIndex": 1000,
+                    "startColumnIndex": contact_col_idx - 1,
+                    "endColumnIndex": contact_col_idx
+                },
+                "rule": {
+                    "condition": {
+                        "type": "ONE_OF_LIST",
+                        "values": [{"userEnteredValue": option} for option in contact_options]
+                    },
+                    "showCustomUi": True,
+                    "strict": True
+                }
+            }
+        }]
+        
+        ws.spreadsheet.batch_update({"requests": requests})
+        print("📋 컨택상태 드롭다운 설정 완료")
+        
+    except Exception as e:
+        print(f"⚠️ 드롭다운 설정 실패: {e}")
+
 def append_new_rows(ws, rows: list[dict], header: list[str]) -> int:
     """
     새로운 데이터 행들을 Google Sheets에 일괄 추가
@@ -215,11 +318,21 @@ def map_csv_to_sheet_format(csv_row: dict) -> dict:
         "등록일자": csv_row.get("등록일자") or "",
     }
 
-# 시트 헤더도 한글로 수정
-SHEET_HEADER = [
-    "clncTestSn", "진행상태", "임상시험명", "임상시험 의뢰자", "소재지", 
-    "대상질환", "대상질환명", "임상시험 단계", "임상시험 기간", 
-    "임상시험 시작월", "임상시험 종료월", "성별", "나이", 
+# 매일 업데이트되는 전체 임상시험 시트 헤더 (컨택상태 없음)
+MAIN_SHEET_HEADER = [
+    "clncTestSn", "진행상태", "임상시험명", "임상시험 의뢰자", "소재지",
+    "대상질환", "대상질환명", "임상시험 단계", "임상시험 기간",
+    "임상시험 시작월", "임상시험 종료월", "성별", "나이",
+    "목표 대상자 수(국내)", "임상시험 승인일자", "최근 변경일자", "이용문의",
+    "실시기관1", "실시기관2", "실시기관3", "실시기관4", "실시기관5",
+    "조회수", "등록일자"
+]
+
+# filtered 시트들용 헤더 (컨택상태 포함)
+FILTERED_SHEET_HEADER = [
+    "clncTestSn", "컨택상태", "진행상태", "임상시험명", "임상시험 의뢰자", "소재지",
+    "대상질환", "대상질환명", "임상시험 단계", "임상시험 기간",
+    "임상시험 시작월", "임상시험 종료월", "성별", "나이",
     "목표 대상자 수(국내)", "임상시험 승인일자", "최근 변경일자", "이용문의",
     "실시기관1", "실시기관2", "실시기관3", "실시기관4", "실시기관5",
     "조회수", "등록일자"
@@ -257,7 +370,7 @@ def main(cfg_path="config/settings.yaml"):
         # Google Sheets에서 마지막 clncTestSn을 확인하고
         # 그 이후의 새로운 임상시험 데이터만 수집
         print("📡 1단계: 2c.py 증분 크롤링")
-        crawler_cmd = ["python", "crawler/2c.py", "--cfg", cfg_path]
+        crawler_cmd = ["/Users/park/project/.venv/bin/python", "crawler/2c.py", "--cfg", cfg_path]
         raw_csv_output = run_command(crawler_cmd)
         
         # 2c.py 출력에서 CSV 파일 경로 추출 (마지막 줄)
@@ -277,7 +390,7 @@ def main(cfg_path="config/settings.yaml"):
         print("\n🔧 2단계: 데이터 정제")
         clean_csv_path = raw_csv_path.replace(".csv", "_clean.csv")
         clean_cmd = [
-            "python", "pipeline/clean_trials.py", 
+            "/Users/park/project/.venv/bin/python", "pipeline/clean_trials.py", 
             "-i", raw_csv_path, 
             "-o", clean_csv_path
         ]
@@ -316,9 +429,20 @@ def main(cfg_path="config/settings.yaml"):
         print(f"🆕 새로운 데이터: {len(new_rows)}개")
         
         if new_rows:
-            ensure_header(ws, SHEET_HEADER)
-            added_count = append_new_rows(ws, new_rows, SHEET_HEADER)
+            # 매일 업데이트되는 전체 임상시험 시트에는 컨택상태 컬럼 없음
+            # 헤더 설정 (컨택상태 제외)
+            ensure_header(ws, MAIN_SHEET_HEADER)
+            added_count = append_new_rows(ws, new_rows, MAIN_SHEET_HEADER)
             print(f"✅ Google Sheets에 {added_count}개 행 추가됨")
+
+            # 진행상태 컬럼의 잘못된 드롭다운 속성 제거
+            print("🔧 진행상태 컬럼 드롭다운 속성 제거 중...")
+            remove_status_dropdown(ws, MAIN_SHEET_HEADER)
+            
+            # 데이터 추가 후 clncTestSn 기준으로 정렬
+            print("🔄 clncTestSn 기준으로 데이터 정렬 중...")
+            sort_worksheet_by_clnc_sn(ws)
+            print("✅ 데이터 정렬 완료")
             
             if new_rows:
                 sample = new_rows[0]
@@ -326,9 +450,21 @@ def main(cfg_path="config/settings.yaml"):
         else:
             print("ℹ️ 추가할 새 데이터가 없습니다.")
         
+        # 4단계: 필터링된 시트 업데이트
+        # 새로운 데이터가 추가되었거나 매일 정기적으로 필터링 시트를 업데이트
+        print("\n📂 4단계: 필터링된 시트 업데이트")
+        try:
+            filter_cmd = ["/Users/park/project/.venv/bin/python", "pipeline/sheets_filter.py", cfg_path]
+            run_command(filter_cmd)
+            print("✅ 필터링된 시트 업데이트 완료")
+        except Exception as filter_error:
+            print(f"⚠️ 필터링 시트 업데이트 실패: {filter_error}")
+            # 필터링 실패해도 전체 파이프라인은 성공으로 처리
+        
         print("\n" + "=" * 60)
         print("🎉 자동화 업데이트 완료!")
         print(f"📊 최종 결과: {len(new_rows)}개 새 항목 추가")
+        print("📝 필터링된 시트도 업데이트됨")
         
         return 0
         

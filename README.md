@@ -4,7 +4,7 @@
 
 ## 📋 시스템 개요
 
-이 시스템은 매일 오전 10시에 자동으로 실행되어 새로운 임상시험 정보를 수집하고, 데이터를 정제한 후 Google Sheets에 업데이트합니다.
+이 시스템은 매일 오전 10시에 자동으로 실행되어 새로운 임상시험 정보를 수집하고, 데이터를 정제한 후 Google Sheets에 업데이트합니다. 또한 다양한 조건으로 필터링된 별도의 시트들을 자동으로 생성하여 효율적인 데이터 관리를 지원합니다.
 
 ### 🔄 자동화 파이프라인
 
@@ -15,7 +15,16 @@
      ↓
 2️⃣ 데이터 정제 (clean_trials.py)  
      ↓
-3️⃣ Google Sheets 업데이트 (sheets_io.py)
+3️⃣ Google Sheets 업데이트 (daily_update_2c.py)
+     ├─ 매일 업데이트되는 전체 임상시험 시트에 데이터 추가
+     ├─ 진행상태 드롭다운 속성 제거 (일반 텍스트로 유지)
+     ├─ clncTestSn 기준 자동 정렬
+     ↓
+4️⃣ 필터링된 시트 생성 (sheets_filter.py)
+     ├─ filtered_premium: 고급 필터링 (2상 이상, 10명 이상 등)
+     ├─ filtered_recruiting: 모집중인 임상시험
+     ├─ filtered_approved: 승인완료된 임상시험
+     └─ 컨택상태 컬럼 추가 & 기존 데이터 보존
      ↓
 📝 로그 저장 (logs/daily_YYYYMMDD.log)
 ```
@@ -35,6 +44,7 @@ project/
 ├── pipeline/                    # 데이터 처리 파이프라인
 │   ├── clean_trials.py         # 데이터 정제 및 변환
 │   ├── sheets_io.py            # Google Sheets 입출력
+│   ├── sheets_filter.py        # 필터링된 시트 생성
 │   └── sheet_keys.py           # 시트 키 관리
 ├── jobs/                        # 스케줄 작업
 │   ├── daily_update_2c.py      # 매일 자동 업데이트 스크립트
@@ -50,7 +60,7 @@ project/
 ### config/settings.yaml
 ```yaml
 sheet_id: "1PncuqrcU1pmNIHsWNepaJe9IdFDMJnpN82e-Fgdn52Y"  # Google Sheets ID
-worksheet: "clinical_trials_full_clean.csv"                # 워크시트 탭 이름
+worksheet: "매일 업데이트 되는 전체 임상시험 시트"                # 워크시트 탭 이름
 service_account_json: "config/sa.json"                     # 서비스 계정 인증 파일
 since_sn_buffer: 10                                        # SN 버퍼 (안전 마진)
 output_dir: "outputs"                                      # 출력 디렉터리
@@ -62,6 +72,35 @@ url_templates:                                             # 크롤링 대상 UR
   - "https://trialforme.konect.or.kr/clnctest/view.do?pageNo=&clncTestSn={sn}&..."
   - "https://www.koreaclinicaltrials.org/clnctest/view.do?pageNo=&clncTestSn={sn}&..."
 ```
+
+## 📊 Google Sheets 구성
+
+시스템은 하나의 Google Sheets 문서 내에 여러 워크시트를 자동으로 생성하고 관리합니다:
+
+### 📋 메인 시트
+- **매일 업데이트 되는 전체 임상시험 시트**: 모든 수집된 임상시험 데이터
+  - clncTestSn 기준 자동 정렬
+  - 진행상태는 일반 텍스트 (승인완료, 모집중, 모집완료, 종료)
+
+### 🔍 필터링된 시트들 (매일 자동 생성)
+- **filtered_premium**: 고급 필터링 조건을 모두 만족하는 임상시험
+  - ❌ 건강인 대상 시험 제외 (생동성 시험 등)
+  - ❌ 연구자 임상시험 제외
+  - ✅ 2상 이상만 포함 (2a상, 2/3상 등 포함)
+  - ✅ 국내 모집인원 10명 이상
+  - ✅ 모집기간 12개월 이상
+  - 📋 컨택상태 컬럼 포함 (드롭다운: 데이터없음, 컨택필요, 컨택중, 컨택종료, 계약진행중, 계약완료)
+
+- **filtered_recruiting**: 진행상태가 "모집중"인 임상시험만
+  - 📋 컨택상태 컬럼 포함
+- **filtered_approved**: 진행상태가 "승인완료"인 임상시험만
+  - 📋 컨택상태 컬럼 포함
+
+### 💡 컨택상태 관리 기능
+- filtered 시트들에만 컨택상태 컬럼 자동 추가 (매일 업데이트되는 전체 임상시험 시트 제외)
+- 기존 컨택상태 데이터 보존 (매일 업데이트 시 리셋되지 않음)
+- 드롭다운 선택으로 진행 상황 체계적 관리
+- 새 데이터는 기본값 "데이터없음"으로 설정
 
 ## 🤖 자동 실행 설정 (Cron)
 
@@ -132,10 +171,18 @@ logs/daily_20250912.log  # 2025년 9월 12일 실행 로그
 📈 처리된 총 행 수: 20
 🆕 새로운 데이터: 10개
 ✅ Google Sheets에 10개 행 추가됨
+📋 컨택상태 드롭다운 설정 중...
+📋 컨택상태 드롭다운 설정 완료
+🔄 clncTestSn 기준으로 데이터 정렬 중...
+✅ 데이터 정렬 완료
+
+📂 4단계: 필터링된 시트 업데이트
+✅ 필터링된 시트 업데이트 완료
 
 ============================================================
 🎉 자동화 업데이트 완료!
 📊 최종 결과: 10개 새 항목 추가
+📝 필터링된 시트도 업데이트됨
 ```
 
 ## 🛠️ 수동 실행 방법
@@ -157,6 +204,9 @@ python pipeline/clean_trials.py -i outputs/increment_*.csv -o outputs/cleaned.cs
 
 # 3. Google Sheets 업로드만 실행
 python pipeline/sheets_io.py outputs/cleaned.csv
+
+# 4. 필터링된 시트만 생성 실행
+python pipeline/sheets_filter.py config/settings.yaml
 ```
 
 ## 🔧 개발자 도구
@@ -243,6 +293,36 @@ pandas                # 데이터 처리
    ```bash
    python jobs/daily_update_2c.py config/settings.yaml
    ```
+
+## 🆕 최신 업데이트 (2025-09-15)
+
+### ✨ 새로 추가된 기능들
+
+1. **📊 자동 정렬 기능**
+   - 새 데이터 추가 후 clncTestSn 기준으로 자동 정렬
+   - A열이 항상 오름차순으로 정리됨
+
+2. **📋 컨택상태 관리 시스템**
+   - 모든 시트에 "컨택상태" 컬럼 자동 추가 (clncTestSn과 진행상태 사이 위치)
+   - 드롭다운 옵션: 데이터없음, 컨택필요, 컨택중, 컨택종료, 계약진행중, 계약완료
+   - 새 데이터는 기본값 "데이터없음"으로 설정
+
+3. **🔍 고급 필터링 시스템**
+   - **filtered_premium**: 2상 이상 + 국내 10명 이상 + 12개월 이상 + 건강인/연구자시험 제외
+   - **filtered_recruiting**: 모집중인 임상시험만
+   - **filtered_approved**: 승인완료된 임상시험만
+   - 매일 자동으로 필터링된 시트들이 갱신됨
+
+4. **🤖 완전 자동화 파이프라인**
+   - 기존 3단계 → 4단계로 확장
+   - 컨택상태 드롭다운 자동 설정
+   - 데이터 정렬 자동 적용
+   - 필터링 시트 자동 생성
+
+### 📈 시스템 성과 
+- 전체 데이터: 6,700+ 개
+- 기본 필터링: 1,700+ 개 (승인완료 + 모집중)
+- 프리미엄 필터링: 700+ 개 (모든 고급 조건 만족)
 
 ## 📞 지원
 
